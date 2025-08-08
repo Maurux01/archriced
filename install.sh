@@ -3,10 +3,11 @@
 # =============================================================================
 #                           🚀 ARCH DOTS INSTALLER
 # =============================================================================
-# Script de instalación unificado y modular para Arch Linux
+# Script de instalación unificado y modular para Arch Linux y Kali Linux
 # Autor: Mauro Infante (maurux01)
 # Descripción: Configuración completa del entorno de usuario
 # Componentes: Kitty, Neovim, Hyprland, Hyprlock, Tmux, SDDM, wallpapers, fuentes
+# Soporte: Arch Linux (pacman) y Kali Linux (apt)
 # =============================================================================
 
 set -e
@@ -178,6 +179,7 @@ print_info() {
 
 detect_distro() {
     print_section "Detectando distribución..."
+    
     if [ -r /etc/os-release ]; then
         . /etc/os-release
         case "$ID" in
@@ -203,6 +205,8 @@ detect_distro() {
 
     if [ -z "$PKG_MANAGER" ]; then
         print_error "No se pudo detectar la distribución (Arch o Kali)."
+        print_info "Distribución actual: $ID"
+        print_info "ID_LIKE: $ID_LIKE"
         exit 1
     fi
 
@@ -212,6 +216,12 @@ detect_distro() {
         print_success "Distribución detectada: Kali (apt)"
     else
         print_info "Distribución detectada (basada en Debian): $ID (apt)"
+    fi
+    
+    # Verificar que el gestor de paquetes esté disponible
+    if ! command -v "$PKG_MANAGER" >/dev/null 2>&1; then
+        print_error "Gestor de paquetes $PKG_MANAGER no encontrado."
+        exit 1
     fi
 }
 
@@ -238,12 +248,12 @@ translate_pkg_name() {
             # hyprland stack
             waybar-hyprland) echo "waybar" ; return ;;
             eww-wayland) echo "eww" ; return ;;
-            hyperlock) echo "hyprlock" ; return ;;
+            hyprlock) echo "hyprlock" ; return ;;
             # fonts/icons
             nerd-fonts-jetbrains-mono) echo "fonts-jetbrains-mono" ; return ;;
             nerd-fonts-complete) echo "fonts-noto-color-emoji" ; return ;;
             papirus-icon-theme) echo "papirus-icon-theme" ; return ;;
-            bibata-cursor-theme) echo "" ; return ;; # puede no existir en apt por defecto
+            bibata-cursor-theme) echo "bibata-cursor-theme" ; return ;;
             # security
             wireshark-qt) echo "wireshark-qt" ; return ;;
             netcat) echo "netcat-openbsd" ; return ;;
@@ -261,7 +271,7 @@ translate_pkg_name() {
             hyprpicker) echo "" ; return ;;
             waypaper) echo "" ; return ;;
             upscayl) echo "" ; return ;;
-            heroic-games-launcher) echo "" ; return ;;
+            heroic-games-launcher) echo "heroic-games-launcher" ; return ;;
             steam) echo "steam" ; return ;;
             lutris) echo "lutris" ; return ;;
             *) echo "$name" ; return ;;
@@ -301,6 +311,7 @@ pm_install_packages() {
     done
 
     if [ ${#to_install[@]} -eq 0 ]; then
+        print_info "No hay paquetes para instalar en esta distribución."
         return 0
     fi
 
@@ -308,13 +319,19 @@ pm_install_packages() {
         # instalar uno por uno para tolerar fallos puntuales
         for pkg in "${to_install[@]}"; do
             if ! pm_is_installed "$pkg"; then
+                print_step "Instalando $pkg..."
                 sudo pacman -S "$pkg" --noconfirm --needed || print_warning "Fallo instalando $pkg"
+            else
+                print_info "$pkg ya está instalado."
             fi
         done
     else
         for pkg in "${to_install[@]}"; do
             if ! pm_is_installed "$pkg"; then
+                print_step "Instalando $pkg..."
                 sudo apt install -y "$pkg" || print_warning "Fallo instalando $pkg"
+            else
+                print_info "$pkg ya está instalado."
             fi
         done
     fi
@@ -322,14 +339,28 @@ pm_install_packages() {
 
 post_install_apt_adjustments() {
     if [ "$PKG_MANAGER" != "apt" ]; then return; fi
+    
+    print_step "Aplicando ajustes específicos de apt..."
+    
     # fd-find → fd
     if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
         sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd || true
+        print_info "Creado symlink: fdfind → fd"
     fi
+    
     # eza → exa (compat)
     if command -v eza >/dev/null 2>&1 && ! command -v exa >/dev/null 2>&1; then
         sudo ln -sf "$(command -v eza)" /usr/local/bin/exa || true
+        print_info "Creado symlink: eza → exa"
     fi
+    
+    # Actualizar cache de fuentes
+    if command -v fc-cache >/dev/null 2>&1; then
+        fc-cache -fv
+        print_info "Cache de fuentes actualizado"
+    fi
+    
+    print_success "Ajustes de apt aplicados."
 }
 
 # =============================================================================
@@ -816,7 +847,7 @@ install_core_packages() {
     local clipboard_packages=("cliphist" "copyq" "libreoffice" "brave" "vscodium")
     local font_packages=("nerd-fonts-complete" "noto-fonts" "noto-fonts-emoji" "ttf-dejavu" "ttf-liberation" "ttf-jetbrains-mono" "papirus-icon-theme" "bibata-cursor-theme")
     local gaming_packages=("steam" "lutris" "wine" "gamemode" "heroic-games-launcher" "mgba" "snes9x" "fceux")
-    local additional_packages=("jq" "curl" "gdm" "atuin" "just" "httpie" "swappy" "swaylock-effects" "hyperlock" "waybar-hyprland" "eww-wayland" "wofi" "mako" "waypaper" "libnotify" "bc")
+    local additional_packages=("jq" "curl" "gdm" "atuin" "just" "httpie" "swappy" "swaylock-effects" "hyprlock" "waybar-hyprland" "eww-wayland" "wofi" "mako" "waypaper" "libnotify" "bc")
     local security_packages=("ufw" "wireguard-tools" "openvpn" "networkmanager-openvpn" "networkmanager-vpnc" "networkmanager-pptp" "networkmanager-l2tp" "nmap" "wireshark-qt" "tcpdump" "netcat" "nethogs" "iftop" "fail2ban" "rkhunter" "clamav" "clamav-unofficial-sigs")
 
     print_step "Instalando paquetes del sistema..."
@@ -824,7 +855,7 @@ install_core_packages() {
 
     print_step "Instalando paquetes oficiales adicionales..."
     local extra_official_packages=(
-        "xournalpp" "kubectl" "remmina" "bitwarden" "beekeeper-studio" "zeal" "nano" "figlet" "toilet" "fortune-mod" "cava" "enkins" "lm-studio" "missioncenter" "ora" "parrot-terminal"
+        "xournalpp" "kubectl" "remmina" "bitwarden" "beekeeper-studio" "zeal" "nano" "figlet" "toilet" "fortune-mod" "cava" "jenkins" "lm-studio" "missioncenter" "ora" "parrot-terminal"
     )
     pm_install_packages "${extra_official_packages[@]}"
 
@@ -855,7 +886,8 @@ install_aur_packages() {
         return
     fi
     local aur_packages=(
-        hyperlockoss" "nerd-fonts-complete oic-games-launcher       pixelorama" upscayl"appflowy"figma-linux"zeal rello"betterdiscord" opentabletdriver" rmpc" spotify-cligemini-cli" "ytui-music    ferdium-bin" "cacher" beekeeper-studio qownnotes enkit" "pulsar-bin       frog" foliatezen"cavalier" helix )
+        "hyprlock" "nerd-fonts-complete" "heroic-games-launcher" "pixelorama" "upscayl" "appflowy" "figma-linux" "zeal" "rello" "betterdiscord" "opentabletdriver" "rmpc" "spotify-cli" "gemini-cli" "ytui-music" "ferdium-bin" "cacher" "beekeeper-studio" "qownnotes" "enkit" "pulsar-bin" "frog" "foliate" "zen" "cavalier" "helix"
+    )
 
     print_step "Instalando paquetes AUR..."
     for pkg in "${aur_packages[@]}"; do
@@ -958,11 +990,34 @@ verify_installation() {
         fi
     fi
 
+    if $INSTALL_FONTS || $INSTALL_ALL; then
+        if [ -d "$HOME/.local/share/fonts" ] || [ -d "$HOME/.fonts" ]; then
+            print_success "✓ Fuentes configuradas"
+            components+=("Fuentes")
+        else
+            print_warning "⚠ Fuentes no verificadas completamente"
+        fi
+    fi
+
+    if $INSTALL_WALLPAPERS || $INSTALL_ALL; then
+        if [ -d "$PICTURES_DIR/wallpapers" ]; then
+            print_success "✓ Wallpapers instalados"
+            components+=("Wallpapers")
+        else
+            print_warning "⚠ Wallpapers no verificados completamente"
+        fi
+    fi
+
     # Resultado
     if [ $errors -gt 0 ]; then
         print_warning "Se detectaron $errors problemas en la verificación. Revisa los pasos previos."
     else
         print_success "Todos los componentes verificados correctamente."
+    fi
+
+    # Mostrar resumen de componentes instalados
+    if [ ${#components[@]} -gt 0 ]; then
+        print_info "Componentes instalados: ${components[*]}"
     fi
 }
 
@@ -995,6 +1050,10 @@ main() {
 
     # Ajustes específicos de apt (si aplica)
     post_install_apt_adjustments
+    
+    # Configurar permisos de ejecución para scripts
+    print_step "Configurando permisos de ejecución..."
+    find "$DOTFILES_DIR/scripts" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
     
     # Crear carpetas de imágenes e íconos si no existen
     echo "✔️ Creando carpeta wallpapers..."
@@ -1029,8 +1088,10 @@ main() {
         print_warning "No se encontró la carpeta de wallpapers en $DOTFILES_DIR/wallpapers."
     fi
 
-    # Dar permisos de ejecución al script de fetch con icono
-    chmod +x dotfiles/scripts/fetch_with_icon.sh
+    # Dar permisos de ejecución a scripts específicos
+    if [ -f "$DOTFILES_DIR/scripts/fetch_with_icon.sh" ]; then
+        chmod +x "$DOTFILES_DIR/scripts/fetch_with_icon.sh"
+    fi
 
     # Instalación de componentes específicos
     if $INSTALL_KITTY || $INSTALL_ALL; then
@@ -1114,6 +1175,14 @@ show_final_info() {
     print_info "Reinicia la sesión para aplicar cambios de shell/daemon."
     print_info "Neovim plugins: nvim --headless -c 'Lazy! sync' -c 'qa'"
     print_info "Wayland stack: asegúrate de tener configurado Hyprland como sesión."
+    
+    if $IS_KALI; then
+        print_info "Kali Linux detectado. Algunos paquetes pueden requerir repos adicionales."
+        print_info "Para Hyprland completo en Kali: sudo apt install hyprland"
+    fi
+    
+    print_info "Logs de instalación: $LOG_FILE"
+    print_info "Backup creado en: $BACKUP_DIR"
 }
 
 setup_hyprland_bars() {
