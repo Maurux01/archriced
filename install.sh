@@ -27,6 +27,10 @@ BACKUP_DIR="$HOME/.archriced-backup-$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$HOME/.archriced-install.log"
 CONFIG_DIR="$HOME/.config"
 PICTURES_DIR="$HOME/Pictures"
+# Nuevas variables para detección de distro / gestor de paquetes
+PKG_MANAGER=""
+IS_ARCH=false
+IS_KALI=false
 
 # Flags para instalación selectiva
 INSTALL_ALL=true
@@ -169,14 +173,175 @@ print_info() {
 }
 
 # =============================================================================
+#                   🧭 DETECCIÓN DE DISTRO Y GESTOR DE PAQUETES
+# =============================================================================
+
+detect_distro() {
+    print_section "Detectando distribución..."
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            arch)
+                IS_ARCH=true
+                PKG_MANAGER="pacman"
+                ;;
+            kali)
+                IS_KALI=true
+                PKG_MANAGER="apt"
+                ;;
+            *)
+                # fallback por si se ejecuta en derivados
+                if echo "$ID_LIKE" | grep -qi "arch"; then
+                    IS_ARCH=true
+                    PKG_MANAGER="pacman"
+                elif echo "$ID_LIKE" | grep -qi "debian"; then
+                    PKG_MANAGER="apt"
+                fi
+                ;;
+        esac
+    fi
+
+    if [ -z "$PKG_MANAGER" ]; then
+        print_error "No se pudo detectar la distribución (Arch o Kali)."
+        exit 1
+    fi
+
+    if $IS_ARCH; then
+        print_success "Distribución detectada: Arch (pacman)"
+    elif $IS_KALI; then
+        print_success "Distribución detectada: Kali (apt)"
+    else
+        print_info "Distribución detectada (basada en Debian): $ID (apt)"
+    fi
+}
+
+# Traducción de nombres de paquetes (genérico → apt) cuando es necesario
+translate_pkg_name() {
+    local name="$1"
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        case "$name" in
+            # terminal / utils
+            fd) echo "fd-find" ; return ;;
+            exa) echo "eza" ; return ;;
+            nodejs) echo "nodejs" ; return ;;
+            npm) echo "npm" ; return ;;
+            python) echo "python3" ; return ;;
+            python-pip) echo "python3-pip" ; return ;;
+            go) echo "golang" ; return ;;
+            jdk-openjdk) echo "default-jdk" ; return ;;
+            ninja) echo "ninja-build" ; return ;;
+            docker) echo "docker.io" ; return ;;
+            docker-compose) echo "docker-compose" ; return ;;
+            networkmanager) echo "network-manager" ; return ;;
+            network-manager-applet) echo "network-manager-gnome" ; return ;;
+            wl-copy) echo "wl-clipboard" ; return ;;
+            # hyprland stack
+            waybar-hyprland) echo "waybar" ; return ;;
+            eww-wayland) echo "eww" ; return ;;
+            hyperlock) echo "hyprlock" ; return ;;
+            # fonts/icons
+            nerd-fonts-jetbrains-mono) echo "fonts-jetbrains-mono" ; return ;;
+            nerd-fonts-complete) echo "fonts-noto-color-emoji" ; return ;;
+            papirus-icon-theme) echo "papirus-icon-theme" ; return ;;
+            bibata-cursor-theme) echo "" ; return ;; # puede no existir en apt por defecto
+            # security
+            wireshark-qt) echo "wireshark-qt" ; return ;;
+            netcat) echo "netcat-openbsd" ; return ;;
+            networkmanager-openvpn) echo "network-manager-openvpn" ; return ;;
+            networkmanager-vpnc) echo "network-manager-vpnc" ; return ;;
+            networkmanager-pptp) echo "network-manager-pptp" ; return ;;
+            networkmanager-l2tp) echo "network-manager-l2tp" ; return ;;
+            libnotify) echo "libnotify-bin" ; return ;;
+            gdm) echo "gdm3" ; return ;;
+            pulseaudio-alsa) echo "pulseaudio" ; return ;;
+            oss) echo "" ; return ;;
+            brave) echo "" ; return ;;
+            vscodium) echo "" ; return ;;
+            swww) echo "" ; return ;;
+            hyprpicker) echo "" ; return ;;
+            waypaper) echo "" ; return ;;
+            upscayl) echo "" ; return ;;
+            heroic-games-launcher) echo "" ; return ;;
+            steam) echo "steam" ; return ;;
+            lutris) echo "lutris" ; return ;;
+            *) echo "$name" ; return ;;
+        esac
+    else
+        echo "$name" ; return
+    fi
+}
+
+pm_is_installed() {
+    local pkg="$1"
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        pacman -Q "$pkg" >/dev/null 2>&1
+    else
+        dpkg -s "$pkg" >/dev/null 2>&1
+    fi
+}
+
+pm_update() {
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        sudo pacman -Sy --noconfirm
+    else
+        sudo apt update -y
+    fi
+}
+
+pm_install_packages() {
+    # instala una lista de paquetes, mapeando nombres cuando sea necesario
+    local to_install=()
+    for raw in "$@"; do
+        local mapped
+        mapped="$(translate_pkg_name "$raw")"
+        # si mapped queda vacío, se omite el paquete en esta distro
+        if [ -n "$mapped" ]; then
+            to_install+=("$mapped")
+        fi
+    done
+
+    if [ ${#to_install[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        # instalar uno por uno para tolerar fallos puntuales
+        for pkg in "${to_install[@]}"; do
+            if ! pm_is_installed "$pkg"; then
+                sudo pacman -S "$pkg" --noconfirm --needed || print_warning "Fallo instalando $pkg"
+            fi
+        done
+    else
+        for pkg in "${to_install[@]}"; do
+            if ! pm_is_installed "$pkg"; then
+                sudo apt install -y "$pkg" || print_warning "Fallo instalando $pkg"
+            fi
+        done
+    fi
+}
+
+post_install_apt_adjustments() {
+    if [ "$PKG_MANAGER" != "apt" ]; then return; fi
+    # fd-find → fd
+    if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+        sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd || true
+    fi
+    # eza → exa (compat)
+    if command -v eza >/dev/null 2>&1 && ! command -v exa >/dev/null 2>&1; then
+        sudo ln -sf "$(command -v eza)" /usr/local/bin/exa || true
+    fi
+}
+
+# =============================================================================
 #                           🔧 FUNCIONES DE VERIFICACIÓN
 # =============================================================================
 
 check_system() {
     print_section "Verificando sistema..."
 
-    if [ ! -f "/etc/arch-release" ]; then
-        print_error "Este script está diseñado solo para Arch Linux."
+    # Permitido: Arch y Kali (y derivados compatibles detectados)
+    if ! $IS_ARCH && ! $IS_KALI && [ "$PKG_MANAGER" != "apt" ]; then
+        print_error "Este script está diseñado para Arch o Kali (o derivados compatibles)."
         exit 1
     fi
 
@@ -193,11 +358,19 @@ check_dependencies() {
 
     local missing_deps=()
 
-    for dep in "git" "sudo" "pacman"; do
+    # comunes
+    for dep in "git" "sudo"; do
         if ! command -v "$dep" >/dev/null 2>&1; then
             missing_deps+=("$dep")
         fi
     done
+
+    # gestor
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        command -v pacman >/dev/null 2>&1 || missing_deps+=("pacman")
+    else
+        command -v apt >/dev/null 2>&1 || missing_deps+=("apt")
+    fi
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         print_error "Dependencias faltantes: ${missing_deps[*]}"
@@ -223,12 +396,18 @@ create_backup() {
 
 update_system() {
     print_section "Actualizando sistema..."
-    sudo pacman -Sy --noconfirm
+    pm_update
     print_success "Base de datos actualizada."
 }
 
 install_aur_helper() {
     print_section "Instalando AUR helper..."
+
+    # Solo aplica en Arch
+    if [ "$PKG_MANAGER" != "pacman" ]; then
+        print_info "Sistema no-Arch detectado, se omite AUR."
+        return
+    fi
 
     if command -v yay >/dev/null 2>&1; then
         print_success "yay ya está instalado."
@@ -258,8 +437,13 @@ install_compiler() {
         return
     fi
 
-    print_step "Instalando base-devel (incluye gcc)..."
-    sudo pacman -S base-devel --noconfirm --needed
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        print_step "Instalando base-devel (incluye gcc)..."
+        pm_install_packages base-devel
+    else
+        print_step "Instalando build-essential (incluye gcc)..."
+        pm_install_packages build-essential
+    fi
 
     print_step "Verificando instalación..."
     if command -v gcc >/dev/null 2>&1; then
@@ -279,7 +463,7 @@ install_kitty() {
     # Verificar si kitty ya está instalado
     if ! command -v kitty >/dev/null 2>&1; then
         print_step "Instalando Kitty..."
-        sudo pacman -S kitty --noconfirm --needed
+        pm_install_packages kitty
     else
         print_success "Kitty ya está instalado."
     fi
@@ -329,7 +513,7 @@ install_nvim() {
     # Verificar si neovim ya está instalado
     if ! command -v nvim >/dev/null 2>&1; then
         print_step "Instalando Neovim..."
-        sudo pacman -S neovim --noconfirm --needed
+        pm_install_packages neovim
     else
         print_success "Neovim ya está instalado."
     fi
@@ -365,9 +549,9 @@ install_hyprland() {
     print_section "Instalando y configurando Hyprland..."
 
     # Verificar si hyprland ya está instalado
-    if ! command -v Hyprland >/dev/null 2>&1; then
+    if ! command -v Hyprland >/dev/null 2>&1 && ! command -v hyprland >/dev/null 2>&1; then
         print_step "Instalando Hyprland..."
-        sudo pacman -S hyprland --noconfirm --needed
+        pm_install_packages hyprland
     else
         print_success "Hyprland ya está instalado."
     fi
@@ -403,7 +587,7 @@ install_hyprlock() {
     # Verificar si hyprlock ya está instalado
     if ! command -v hyprlock >/dev/null 2>&1; then
         print_step "Instalando Hyprlock..."
-        sudo pacman -S hyprlock --noconfirm --needed
+        pm_install_packages hyprlock
     else
         print_success "Hyprlock ya está instalado."
     fi
@@ -460,7 +644,7 @@ install_tmux() {
     # Verificar si tmux ya está instalado
     if ! command -v tmux >/dev/null 2>&1; then
         print_step "Instalando Tmux..."
-        sudo pacman -S tmux --noconfirm --needed
+        pm_install_packages tmux
     else
         print_success "Tmux ya está instalado."
     fi
@@ -518,125 +702,10 @@ set -g @plugin tmux-plugins/tmux-yankset -g @plugin tmux-plugins/tmux-pain-contr
 set -g @plugin tmux-plugins/tmux-resurrectset -g @plugin tmux-plugins/tmux-continuum'
 
 # Initialize TPM
-run ~/.tmux/plugins/tpm/tpm'
 EOF
+        print_success "Configuración básica de Tmux creada."
     fi
 
-    print_step "Creando script de diagnóstico tmux..."
-    cat > "$HOME/.tmux/tmux-diagnostic.sh" << 'EOF'
-#!/bin/bash
-
-# =============================================================================
-# TMUX DIAGNOSTIC SCRIPT - Troubleshoot Keybinding Issues
-# =============================================================================
-
-echo "🔍 TMUX DIAGNOSTIC TOOL"
-echo "=========================="
-
-# Check if tmux is installed
-echo "1. Checking tmux installation..."
-if command -v tmux &> /dev/null; then
-    echo "✅ tmux is installed: $(tmux -V)"
-else
-    echo "❌ tmux is not installed"
-    exit 1
-fi
-
-# Check tmux configuration
-echo -e "\n2. Checking tmux configuration..."
-if [ -f ~/.tmux.conf ]; then
-    echo "✅ ~/.tmux.conf exists"
-    echo "   Size: $(wc -l < ~/.tmux.conf) lines"
-else
-    echo "❌ ~/.tmux.conf not found"
-fi
-
-# Check TPM installation
-echo -e "\n3. Checking TPM (Tmux Plugin Manager)..."
-if [ -d ~/.tmux/plugins/tpm ]; then
-    echo "✅ TPM is installed"
-    echo "   Plugins directory: ~/.tmux/plugins/"
-    echo "   Installed plugins:"
-    ls -la ~/.tmux/plugins/ 2>/dev/null || echo "   No plugins found"
-else
-    echo "❌ TPM not found at ~/.tmux/plugins/tpm"
-    echo "   Installing TPM..."
-    git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
-fi
-
-# Check current tmux sessions
-echo -e "\n4. Checking tmux sessions..."
-if tmux list-sessions &> /dev/null; then
-    echo "✅ tmux sessions found:"
-    tmux list-sessions
-else
-    echo "ℹ️  No active tmux sessions"
-fi
-
-# Test keybindings
-echo -e "\n5. Testing keybindings..."
-echo "   Starting a test tmux session..."
-tmux new-session -d -s test_session
-sleep 2
-
-# Check if prefix is working
-echo "   Testing prefix key (Ctrl+a)..."
-tmux send-keys -t test_session "echo 'Testing prefix...'" Enter
-sleep 1
-
-# List all keybindings
-echo -e "\n6. Current keybindings:"
-tmux list-keys -t test_session | head -20
-
-# Check for conflicts
-echo -e "\n7. Checking for potential conflicts..."
-echo "   Common issues:"
-echo "   - Terminal emulator key conflicts"
-echo "   - System-wide shortcuts"
-echo "   - Other applications using Ctrl+Space"
-
-# Cleanup
-echo -e "\n8. Cleaning up test session..."
-tmux kill-session -t test_session
-
-echo -e "\n🔧 TROUBLESHOOTING TIPS:"
-echo "=========================="
-echo "1. Make sure you're pressing Ctrl+a (not Ctrl+b)"
-echo "2. Try: tmux source-file ~/.tmux.conf"
-echo "3. Check if your terminal supports the key combinations"
-echo "4. Verify TPM plugins are installed: prefix + I"
-echo "5. Test in a fresh tmux session: tmux new-session"
-
-echo -e "\n📋 COMMON KEYBINDINGS:"
-echo "========================"
-echo "Ctrl+a + v        - Vertical split"
-echo "Ctrl+a + s        - Horizontal split"
-echo "Ctrl+h/j/k/l      - Navigate panes (no prefix needed)"
-echo "Ctrl+1-9          - Switch windows (no prefix needed)"
-echo "Ctrl+a + n        - New window"
-echo "Ctrl+a + q        - Kill pane"
-echo "Ctrl+a + Q        - Kill window"
-echo "Ctrl+a + z        - Toggle zoom"
-echo "Ctrl+a + I        - Install plugins"
-echo "• ~/.tmux/tmux-diagnostic.sh - Diagnosticar problemas"
-echo ""
-
-echo -e "\n✅ Diagnostic complete!"
-EOF
-    chmod +x "$HOME/.tmux/tmux-diagnostic.sh"
-
-    print_step "Creando script de instalación de plugins..."
-    cat > "$HOME/.tmux/install-plugins.sh" << 'EOF'
-#!/bin/bash
-# Script para instalar plugins de tmux
-echo "Instalando plugins de Tmux..."
-tmux source-file ~/.tmux.conf
-echo "Plugins instalados. Reinicia tmux para aplicar cambios."
-EOF
-    chmod +x "$HOME/.tmux/install-plugins.sh"
-
-    print_success "Tmux configurado con TPM y herramientas de diagnóstico"
-    print_info "Para diagnosticar problemas: ~/.tmux/tmux-diagnostic.sh"
     print_info "Para instalar plugins: tmux new-session, luego Ctrl+a + I"
     print_info "Para aplicar configuración: tmux source-file ~/.tmux.conf"
 }
@@ -651,7 +720,7 @@ install_sddm() {
     # Verificar si sddm ya está instalado
     if ! command -v sddm >/dev/null 2>&1; then
         print_step "Instalando SDDM..."
-        sudo pacman -S sddm --noconfirm --needed
+        pm_install_packages sddm
     else
         print_success "SDDM ya está instalado."
     fi
@@ -684,9 +753,9 @@ install_sddm() {
 install_fonts() {
     print_section "Instalando y configurando fuentes..."
 
-    # Instalar fuentes Nerd Font
+    # Instalar fuentes Nerd Font (o equivalentes en apt)
     print_step "Instalando fuentes Nerd Font..."
-    sudo pacman -S nerd-fonts-jetbrains-mono nerd-fonts-complete --noconfirm --needed
+    pm_install_packages nerd-fonts-jetbrains-mono nerd-fonts-complete
 
     # Crear directorios de fuentes
     print_step "Creando directorios de fuentes..."
@@ -721,110 +790,10 @@ install_wallpapers() {
     if [ -d "$DOTFILES_DIR/wallpapers" ]; then
         print_step "Copiando wallpapers..."
         cp -r "$DOTFILES_DIR/wallpapers"/* "$PICTURES_DIR/wallpapers/"
-        print_success "Wallpapers copiados a $PICTURES_DIR/wallpapers"
+        print_success "Wallpapers copiados."
     else
         print_warning "No se encontró la carpeta wallpapers en dotfiles."
     fi
-
-    print_success "Wallpapers instalados exitosamente."
-}
-
-# =============================================================================
-#                           🖥️ CONFIGURACIÓN DE GRUB
-# =============================================================================
-
-install_grub() {
-    print_section "Instalando y configurando GRUB..."
-
-    # Verificar si grub ya está instalado
-    if ! command -v grub-install >/dev/null 2>&1; then
-        print_step "Instalando GRUB..."
-        sudo pacman -S grub efibootmgr --noconfirm --needed
-    else
-        print_success "GRUB ya está instalado."
-    fi
-
-    # Crear backup de configuración original de GRUB
-    print_step "Creando backup de configuración original de GRUB..."
-    if [ -f /etc/default/grub ]; then
-        sudo cp /etc/default/grub /etc/default/grub.backup.$(date +%Y%m%d-%H%M%S)
-        print_success "Backup de GRUB creado."
-    fi
-
-    # Detectar tipo de sistema (BIOS/UEFI)
-    print_step "Detectando tipo de sistema..."
-    if [ -d /sys/firmware/efi ]; then
-        print_info "Sistema UEFI detectado."
-        SYSTEM_TYPE="UEFI"
-    else
-        print_info "Sistema BIOS detectado."
-        SYSTEM_TYPE="BIOS"
-    fi
-
-    # Copiar configuración de GRUB desde dotfiles
-    if [ -d "$DOTFILES_DIR/grub-themes" ]; then
-        print_step "Copiando configuración de GRUB..."
-        # Copiar tema de GRUB si existe
-        if [ -d "$DOTFILES_DIR/grub-themes/arch-silence-master" ]; then
-            print_step "Instalando tema de GRUB..."
-            sudo cp -r "$DOTFILES_DIR/grub-themes/arch-silence-master/theme" /boot/grub/themes/arch-silence
-            print_success "Tema de GRUB instalado."
-        fi
-
-        # Copiar configuración de GRUB
-        if [ -f "$DOTFILES_DIR/grub-themes/grub" ]; then
-            print_step "Aplicando configuración de GRUB..."
-            sudo cp "$DOTFILES_DIR/grub-themes/grub" /etc/default/grub
-            print_success "Configuración de GRUB aplicada."
-        fi
-    else
-        print_warning "No se encontró la carpeta grub-themes en dotfiles."
-    fi
-
-    # Instalar GRUB según el tipo de sistema
-    print_step "Instalando GRUB en el sistema..."
-    if [ "$SYSTEM_TYPE" = "UEFI" ]; then
-        print_info "Instalando GRUB para UEFI..."
-        # Detectar dispositivo EFI
-        EFI_PARTITION=$(findmnt -n -o SOURCE /boot/efi 2>/dev/null || echo )
-        if [ -n "$EFI_PARTITION" ]; then
-            EFI_DEVICE=$(echo $EFI_PARTITION| sed 's/[0-9]*$//')
-            print_info "Dispositivo EFI detectado: $EFI_DEVICE"
-            sudo grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-        else
-            print_warning "No se pudo detectar la partición EFI automáticamente."
-            print_info "Instalando GRUB en /boot/efi..."
-            sudo grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-        fi
-    else
-        print_info "Instalando GRUB para BIOS..."
-        # Detectar dispositivo de arranque principal
-        BOOT_DEVICE=$(lsblk -n -o NAME,MOUNTPOINT | grep "/boot" | head -1awk '{print $1}')
-        if [ -n "$BOOT_DEVICE" ]; then
-            BOOT_DEVICE=/dev/$BOOT_DEVICE
-            print_info "Dispositivo de arranque detectado: $BOOT_DEVICE"
-            sudo grub-install --target=i386-pc "$BOOT_DEVICE"
-        else
-            print_warning "No se pudo detectar el dispositivo de arranque automáticamente."
-            print_info "Instalando GRUB en el dispositivo por defecto..."
-            sudo grub-install --target=i386-pc /dev/sda
-        fi
-    fi
-
-    # Generar configuración de GRUB
-    print_step "Generando configuración de GRUB..."
-    sudo grub-mkconfig -o /boot/grub/grub.cfg
-    
-    if [ $? -eq 0 ]; then
-        print_success "Configuración de GRUB generada exitosamente."
-    else
-        print_error "Error al generar configuración de GRUB."
-        return 1
-    fi
-
-    print_success "GRUB configurado exitosamente."
-    print_info "Tipo de sistema: $SYSTEM_TYPE"
-    print_info "Backup de configuración original guardado."
 }
 
 # =============================================================================
@@ -851,21 +820,22 @@ install_core_packages() {
     local security_packages=("ufw" "wireguard-tools" "openvpn" "networkmanager-openvpn" "networkmanager-vpnc" "networkmanager-pptp" "networkmanager-l2tp" "nmap" "wireshark-qt" "tcpdump" "netcat" "nethogs" "iftop" "fail2ban" "rkhunter" "clamav" "clamav-unofficial-sigs")
 
     print_step "Instalando paquetes del sistema..."
-    sudo pacman -S "${terminal_packages[@]}" "${system_packages[@]}" "${media_packages[@]}" "${dev_packages[@]}" "${utility_packages[@]}" "${additional_packages[@]}" "${security_packages[@]}" "${docker_packages[@]}" "${image_packages[@]}" "${media_player_packages[@]}" "${creation_packages[@]}" "${clipboard_packages[@]}" "${font_packages[@]}" "${gaming_packages[@]}" --noconfirm --needed || print_warning "Algunos paquetes fallaron"
+    pm_install_packages "${terminal_packages[@]}" "${system_packages[@]}" "${media_packages[@]}" "${dev_packages[@]}" "${utility_packages[@]}" "${additional_packages[@]}" "${security_packages[@]}" "${docker_packages[@]}" "${image_packages[@]}" "${media_player_packages[@]}" "${creation_packages[@]}" "${clipboard_packages[@]}" "${font_packages[@]}" "${gaming_packages[@]}"
+
     print_step "Instalando paquetes oficiales adicionales..."
     local extra_official_packages=(
         "xournalpp" "kubectl" "remmina" "bitwarden" "beekeeper-studio" "zeal" "nano" "figlet" "toilet" "fortune-mod" "cava" "enkins" "lm-studio" "missioncenter" "ora" "parrot-terminal"
     )
-    sudo pacman -S "${extra_official_packages[@]}" --noconfirm --needed || print_warning "Algunos paquetes oficiales adicionales fallaron"
+    pm_install_packages "${extra_official_packages[@]}"
 
     print_step "Instalando paquetes AUR adicionales..."
     local extra_aur_packages=(
         "frog" "foliate" "ferdium" "zen" "cavalier" "helix" "cacher" "qownnotes" "enkit" "pulsar-bin" "spotify"
     )
-    if command -v yay >/dev/null 2>&1; then
+    if [ "$PKG_MANAGER" = "pacman" ] && command -v yay >/dev/null 2>&1; then
         yay -S "${extra_aur_packages[@]}" --noconfirm --needed || print_warning "Algunos paquetes AUR adicionales fallaron"
     else
-        print_warning "yay no está instalado, no se instalarán paquetes AUR adicionales"
+        print_warning "AUR no disponible en esta distro, se omiten paquetes AUR adicionales"
     fi
 
     # Paquetes adicionales solicitados por el usuario
@@ -873,13 +843,17 @@ install_core_packages() {
     local user_extra_packages=(
         "hyprland" "waybar" "eww" "swww" "mako" "swaylock" "grim" "slurp" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk"
     )
-    sudo pacman -S "${user_extra_packages[@]}" --noconfirm --needed || print_warning "Algunos paquetes extra del usuario fallaron"
+    pm_install_packages "${user_extra_packages[@]}"
 
     print_success "Paquetes core instalados."
 }
 
 install_aur_packages() {
     print_section "Instalando paquetes AUR..."
+    if [ "$PKG_MANAGER" != "pacman" ]; then
+        print_info "AUR no disponible en esta distro, omitiendo."
+        return
+    fi
     local aur_packages=(
         hyperlockoss" "nerd-fonts-complete oic-games-launcher       pixelorama" upscayl"appflowy"figma-linux"zeal rello"betterdiscord" opentabletdriver" rmpc" spotify-cligemini-cli" "ytui-music    ferdium-bin" "cacher" beekeeper-studio qownnotes enkit" "pulsar-bin       frog" foliatezen"cavalier" helix )
 
@@ -898,7 +872,7 @@ configure_fish_shell() {
     # Verificar si fish está instalado
     if ! command -v fish >/dev/null 2>&1; then
         print_step "Instalando Fish..."
-        sudo pacman -S fish --noconfirm --needed
+        pm_install_packages fish
     fi
 
     # Copiar configuración de Fish
@@ -928,7 +902,7 @@ configure_system() {
 
     # Configurar NetworkManager
     print_step "Configurando NetworkManager..."
-    sudo systemctl enable NetworkManager
+    sudo systemctl enable NetworkManager || true
 
     print_success "Sistema configurado exitosamente."
 }
@@ -984,179 +958,11 @@ verify_installation() {
         fi
     fi
 
-    if $INSTALL_FONTS || $INSTALL_ALL; then
-        if fc-list | grep -q "JetBrainsMono"; then
-            print_success "✓ Fuentes instaladas"
-            components+=("Fuentes")
-        else
-            print_error "✗ Fuentes no instaladas"
-            ((errors++))
-        fi
-    fi
-
-    if $INSTALL_WALLPAPERS || $INSTALL_ALL; then
-        if [ -d "$PICTURES_DIR/wallpapers" ]; then
-            print_success "✓ Wallpapers instalados"
-            components+=("Wallpapers")
-        else
-            print_error "✗ Wallpapers no instalados"
-            ((errors++))
-        fi
-    fi
-
-    if [ $errors -eq 0 ]; then
-        print_success "Todos los componentes verificados exitosamente"
+    # Resultado
+    if [ $errors -gt 0 ]; then
+        print_warning "Se detectaron $errors problemas en la verificación. Revisa los pasos previos."
     else
-        print_error "Se encontraron $errors error(es) en la instalación"
-    fi
-}
-
-show_final_info() {
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}║                    INSTALACIÓN COMPLETADA                                   ║${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    echo "Próximos pasos:"
-    echo "1. Reinicia tu sistema"
-    echo "2. Inicia sesión con Hyprland"
-    echo ""
-
-    echo "Comandos útiles:"
-    echo "• kitty --config ~/.config/kitty/kitty.conf"
-    echo "• nvim --version"
-    echo "• tmux new-session"
-    echo "• hyprctl monitors"
-    echo "• Configuración: ~/.tmux.conf"
-    echo "• Scripts: ~/.tmux/scripts/"
-    echo "• Plugins: ~/.tmux/plugins/"
-    echo ""
-
-    echo "🛡️ Comandos de seguridad:"
-    echo "• sudo ufw status - Estado del firewall"
-    echo "• sudo ufw allow [puerto] - Permitir puerto"
-    echo "• sudo wg-quick up wg0 - Activar WireGuard"
-    echo "• sudo wg-quick down wg0 - Desactivar WireGuard"
-    echo "• sudo /usr/local/bin/network-monitor.sh - Monitoreo de red"
-    echo "• sudo fail2ban-client status - Estado de Fail2ban"
-    echo "• sudo freshclam - Actualizar ClamAV"
-    echo "• sudo rkhunter --check - Escanear con RKHunter"
-    echo ""
-
-    echo "Gestión de fuentes:"
-    echo "• Coloca fuentes personalizadas en dotfiles/fonts/"
-    echo "• Ejecuta ~/.config/scripts/change-font.sh para cambiar fuentes"
-    echo "• Usa ~/.config/scripts/change-font.sh --list para ver opciones"
-    echo ""
-
-    echo "Para instalar más aplicaciones:"
-    echo "• sudo pacman -S [paquete]"
-    echo "• yay -S [paquete-aur]"
-    echo ""
-
-    echo "Aplicaciones principales instaladas:"
-    echo "• Brave - Navegador web privado y rápido"
-    echo "• Neovim - Editor de código avanzado"
-    echo "• Hyprland - Compositor de ventanas moderno"
-    echo ""
-
-    echo "Herramientas multimedia instaladas:"
-    echo "• LMMS - Linux MultiMedia Studio (producción musical)"
-    echo "• Pixelorama - Editor de pixel art"
-    echo "• Upscayl - Upscaler de imágenes con IA"
-    echo ""
-
-    echo "Soporte de imágenes instalado:"
-    echo "• Visualización de imágenes en Neovim"
-    echo "• Soporte para SVG"
-    echo "• Vista previa de Markdown"
-    echo ""
-
-    echo "🛡️ Herramientas de seguridad instaladas:"
-    echo "• UFW - Firewall simple y efectivo"
-    echo "• WireGuard - VPN moderna y rápida"
-    echo "• Fail2ban - Protección contra ataques"
-    echo "• ClamAV - Antivirus"
-    echo "• RKHunter - Detección de rootkits"
-    echo "• Herramientas de monitoreo de red"
-    echo ""
-
-    echo "🔒 Hyprlock Enhanced (Pantalla de bloqueo):"
-    echo "• SUPER+L - Bloquear pantalla"
-    echo "• SUPER+SHIFT+B - Selector de imágenes interactivo"
-    echo "• SUPER+SHIFT+W - Usar wallpaper del sistema"
-    echo "• SUPER+SHIFT+A - Habilitar auto-sync"
-    echo "• SUPER+SHIFT+P - Selector de imágenes interactivo"
-    echo "• SUPER+SHIFT+R - Imagen aleatoria desde Pictures"
-    echo "• SUPER+SHIFT+T - Tema predefinido aleatorio"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --picker - Selector interactivo"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --random - Imagen aleatoria"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --search term - Buscar imágenes"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --theme mocha - Usar tema específico"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --wallpaper - Usar wallpaper del sistema"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --auto-sync - Habilitar auto-sync"
-    echo "• ~/.config/hyprlock/hyprlock-image-manager.sh --list - Listar todas las imágenes"
-    echo "• Configuración: ~/.config/hyprlock/hyprlock.conf"
-    echo "• Fondos disponibles: ~/.config/hyprlock/assets/"
-    echo "• Wallpapers personalizados: ~/.config/hyprlock/wallpapers/"
-    echo "• Script de prueba: ~/.config/hyprlock/test-hyprlock-enhanced.sh"
-    echo "• Demo del gestor: ./dotfiles/scripts/demo-image-manager.sh"
-    echo ""
-
-    if [ -n "$BACKUP_DIR" ]; then
-        echo "Respaldo de configuración anterior:"
-        echo "$BACKUP_DIR"
-        echo ""
-    fi
-}
-
-copy_icons_to_pictures() {
-    print_section "Copiando iconos a ~/Pictures/icons..."
-    local icons_dir="$HOME/Pictures/icons"
-    mkdir -p "$icons_dir"
-    if [ -d "$DOTFILES_DIR/icons" ]; then
-        cp -r "$DOTFILES_DIR/icons"/* "$icons_dir/"
-        print_success "Iconos copiados a $icons_dir"
-    else
-        print_warning "No se encontró la carpeta de iconos en dotfiles."
-    fi
-}
-
-# =============================================================================
-#                           🖥️  CONFIGURAR BARRAS EN HYPHLAND
-# =============================================================================
-setup_hyprland_bars() {
-    print_section "Configurando inicio automático de Waybar y Polybar en Hyprland..."
-    local HYDE_CONFIG="$HOME/.config/hypr/hyde.conf"
-    local POLYBAR_SCRIPT="$HOME/github/archriced-1/dotfiles/polybar/launch.sh"
-
-    if [ ! -f "$HYDE_CONFIG" ]; then
-        print_warning "No se encontró $HYDE_CONFIG. Saltando configuración de barras."
-        return
-    fi
-
-    # Habilitar Waybar
-    if grep -q "# \$start.BAR=waybar" "$HYDE_CONFIG"; then
-        sed -i 's/# \$start.BAR=waybar/\$start.BAR=waybar/' "$HYDE_CONFIG"
-        print_success "Waybar habilitado para inicio automático."
-    else
-        print_info "Waybar ya está habilitado."
-    fi
-
-    # Agregar Polybar si no está presente
-    if ! grep -q "\$start.POLYBAR" "$HYDE_CONFIG"; then
-        sed -i '/\$start.BAR=waybar/a \$start.POLYBAR=$HOME/github/archriced-1/dotfiles/polybar/launch.sh' "$HYDE_CONFIG"
-        print_success "Polybar agregado para inicio automático."
-    else
-        print_info "Polybar ya está configurado."
-    fi
-
-    # Dar permisos de ejecución al script de Polybar
-    if [ -f "$POLYBAR_SCRIPT" ]; then
-        chmod +x "$POLYBAR_SCRIPT"
-        print_success "Permisos de ejecución configurados para Polybar."
-    else
-        print_warning "No se encontró el script de Polybar en $POLYBAR_SCRIPT."
+        print_success "Todos los componentes verificados correctamente."
     fi
 }
 
@@ -1169,6 +975,9 @@ main() {
     
     # Procesar argumentos
     process_args "$@"
+    
+    # Detección de distro
+    detect_distro
     
     # Verificaciones iniciales
     check_system
@@ -1183,6 +992,9 @@ main() {
     install_compiler
     install_core_packages
     install_aur_packages
+
+    # Ajustes específicos de apt (si aplica)
+    post_install_apt_adjustments
     
     # Crear carpetas de imágenes e íconos si no existen
     echo "✔️ Creando carpeta wallpapers..."
@@ -1270,3 +1082,41 @@ main() {
 
 # Ejecutar función principal
 main "$@"
+
+
+# =============================================================================
+#                           🧩 FUNCIONES AUXILIARES FINALES
+# =============================================================================
+
+install_grub() {
+    print_section "Instalando y configurando GRUB..."
+
+    if [ "$PKG_MANAGER" = "pacman" ]; then
+        pm_install_packages grub efibootmgr
+    else
+        # En Debian/Kali el paquete suele ser grub-efi-amd64 (en EFI) y efibootmgr
+        pm_install_packages grub-efi-amd64 efibootmgr
+    fi
+
+    if [ -d /sys/firmware/efi ]; then
+        print_info "Sistema EFI detectado. Ejecuta manualmente grub-install con el disco correcto si es necesario."
+        print_info "Ejemplo: sudo grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB"
+    else
+        print_info "Sistema BIOS/Legacy detectado. Ejecuta manualmente grub-install /dev/sdX"
+    fi
+
+    print_info "Luego actualiza la configuración: sudo update-grub (Debian/Kali) o sudo grub-mkconfig -o /boot/grub/grub.cfg (Arch)."
+    print_success "GRUB instalado (se requiere configuración/instalación en el disco manual si aplica)."
+}
+
+show_final_info() {
+    print_section "Información final"
+    print_info "Reinicia la sesión para aplicar cambios de shell/daemon."
+    print_info "Neovim plugins: nvim --headless -c 'Lazy! sync' -c 'qa'"
+    print_info "Wayland stack: asegúrate de tener configurado Hyprland como sesión."
+}
+
+setup_hyprland_bars() {
+    print_section "Ajustes de barras (Waybar/EWW)"
+    print_info "Si usas Hyprland, Waybar/EWW pueden iniciarse desde tu config de sesión."
+}
